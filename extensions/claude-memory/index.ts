@@ -11,7 +11,12 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
+import {
+	generateDiffString,
+	keyHint,
+	withFileMutationQueue,
+} from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import path from "node:path";
 
@@ -19,6 +24,7 @@ import {
 	buildMemoryPrompt,
 	listMemories,
 	memoryDirFor,
+	memorySummary,
 	readMemory,
 	writeMemory,
 } from "./memory-core.ts";
@@ -81,7 +87,12 @@ export default function (pi: ExtensionAPI) {
 							text: `${memory.description}\n\n${memory.body}`,
 						},
 					],
-					details: { name: memory.name, type: memory.type },
+					details: {
+						name: memory.name,
+						type: memory.type,
+						description: memory.description,
+						body: memory.body,
+					},
 				};
 			} catch (error) {
 				return {
@@ -89,6 +100,26 @@ export default function (pi: ExtensionAPI) {
 					details: {},
 				};
 			}
+		},
+
+		renderResult(result, { expanded, isPartial }, theme, _context) {
+			if (isPartial) return new Text(theme.fg("warning", "Reading..."), 0, 0);
+			const details = result.details as
+				| { name?: string; description?: string; body?: string }
+				| undefined;
+
+			const collapsed = theme.fg(
+				"success",
+				`${details?.name ?? "memory"}: ${details?.description ?? ""}`,
+			);
+			if (!expanded || !details?.body) {
+				return new Text(
+					`${collapsed} ${theme.fg("dim", `(${keyHint("app.tools.expand", "expand")})`)}`,
+					0,
+					0,
+				);
+			}
+			return new Text(`${collapsed}\n${theme.fg("dim", details.body)}`, 0, 0);
 		},
 	});
 
@@ -128,10 +159,22 @@ export default function (pi: ExtensionAPI) {
 			// turn would race and lose an index line without this queue.
 			return withFileMutationQueue(path.join(dir, "MEMORY.md"), async () => {
 				try {
-					writeMemory(dir, params);
+					const { memory, previous, created } = writeMemory(dir, params);
+					const diff =
+						previous === null
+							? undefined
+							: generateDiffString(previous.body, memory.body).diff;
 					return {
-						content: [{ type: "text" as const, text: `Saved memory "${params.name}".` }],
-						details: { name: params.name, dir },
+						content: [
+							{ type: "text" as const, text: memorySummary(params.name, created) },
+						],
+						details: {
+							name: params.name,
+							dir,
+							created,
+							diff,
+							body: memory.body,
+						},
 					};
 				} catch (error) {
 					return {
@@ -142,6 +185,57 @@ export default function (pi: ExtensionAPI) {
 					};
 				}
 			});
+		},
+
+		renderResult(result, { expanded, isPartial }, theme, _context) {
+			if (isPartial) return new Text(theme.fg("warning", "Writing..."), 0, 0);
+			const details = result.details as
+				| { name?: string; created?: boolean; diff?: string; body?: string }
+				| undefined;
+
+			if (!details?.name) {
+				const content = result.content[0];
+				return new Text(
+					theme.fg("error", content?.type === "text" ? content.text : "Failed"),
+					0,
+					0,
+				);
+			}
+
+			const summary = theme.fg(
+				"success",
+				memorySummary(details.name, details.created ?? true),
+			);
+
+			if (!expanded) {
+				return new Text(
+					`${summary} ${theme.fg("dim", `(${keyHint("app.tools.expand", "expand")})`)}`,
+					0,
+					0,
+				);
+			}
+
+			// Show a diff when updating an existing memory, otherwise the new body.
+			if (details.diff) {
+				const lines = details.diff.split("\n").slice(0, 30);
+				let text = summary;
+				for (const line of lines) {
+					if (line.startsWith("+")) {
+						text += `\n${theme.fg("success", line)}`;
+					} else if (line.startsWith("-")) {
+						text += `\n${theme.fg("error", line)}`;
+					} else {
+					text += `\n${theme.fg("dim", line)}`;
+				}
+				}
+				const total = details.diff.split("\n").length;
+				if (total > 30) {
+					text += `\n${theme.fg("muted", `... ${total - 30} more diff lines`)}`;
+				}
+				return new Text(text, 0, 0);
+			}
+
+			return new Text(`${summary}\n${theme.fg("dim", details.body ?? "")}`, 0, 0);
 		},
 	});
 

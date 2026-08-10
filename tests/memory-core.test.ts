@@ -14,6 +14,7 @@ import {
 	readMemory,
 	writeMemory,
 	buildMemoryPrompt,
+	memorySummary,
 } from "../extensions/claude-memory/memory-core.ts";
 
 function tmpdir(): string {
@@ -204,6 +205,28 @@ test("buildMemoryPrompt falls back to memory files when the index is missing", (
 	assert.ok(prompt);
 	assert.match(prompt, /orphan/);
 	assert.match(prompt, /no index line exists/);
+});
+
+test("writeMemory reports created=true with no previous for a new memory", () => {
+	const dir = tmpdir();
+	const out = writeMemory(dir, { name: "a", description: "d", body: "first" });
+	assert.equal(out.created, true);
+	assert.equal(out.previous, null);
+	assert.equal(out.memory.body, "first");
+});
+
+test("writeMemory reports created=false with the previous body on update", () => {
+	const dir = tmpdir();
+	writeMemory(dir, { name: "a", description: "d", body: "first" });
+	const out = writeMemory(dir, { name: "a", description: "d", body: "second" });
+	assert.equal(out.created, false);
+	assert.equal(out.previous?.body, "first");
+	assert.equal(out.memory.body, "second");
+});
+
+test("memorySummary distinguishes save vs update", () => {
+	assert.equal(memorySummary("deploy-runbook", true), 'Saved memory "deploy-runbook".');
+	assert.equal(memorySummary("deploy-runbook", false), 'Updated memory "deploy-runbook".');
 });
 
 test("writeMemory output is readable by parseIndex and listMemories together", () => {
