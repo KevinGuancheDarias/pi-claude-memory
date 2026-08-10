@@ -31,6 +31,12 @@ Mirrors Claude Code's two-tier design, so a large store stays cheap:
 | `memory_write` | Save or update a memory, registering it in the index |
 | `memory_list` | List every memory with its description |
 
+Tool output is compact by default and expands with `ctrl+o`
+(`app.tools.expand`), matching pi's built-in tools: `memory_write` shows the
+new body — or a diff against the previous body when updating an existing
+memory — and `memory_read` shows the full body in place of the one-line
+description.
+
 ## Install
 
 ```bash

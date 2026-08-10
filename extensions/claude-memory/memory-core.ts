@@ -200,10 +200,23 @@ export function readMemory(dir: string, name: string): Memory | null {
 	return { ...parsed, name: parsed.name || name };
 }
 
+export interface WriteMemoryResult {
+	memory: Memory;
+	previous: Memory | null;
+	created: boolean;
+}
+
+/** One-line summary shown for a memory_write tool result. */
+export function memorySummary(name: string, created: boolean): string {
+	return created ? `Saved memory "${name}".` : `Updated memory "${name}".`;
+}
+
 /** Write (or overwrite) a memory and register it in the index. */
-export function writeMemory(dir: string, input: WriteMemoryInput): Memory {
+export function writeMemory(dir: string, input: WriteMemoryInput): WriteMemoryResult {
 	assertSafeName(input.name);
 	fs.mkdirSync(dir, { recursive: true });
+
+	const previous = readMemory(dir, input.name);
 
 	const memory: Memory = {
 		name: input.name,
@@ -221,5 +234,5 @@ export function writeMemory(dir: string, input: WriteMemoryInput): Memory {
 	});
 	fs.writeFileSync(path.join(dir, INDEX_FILE), index);
 
-	return memory;
+	return { memory, previous, created: previous === null };
 }
