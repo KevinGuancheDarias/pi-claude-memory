@@ -1,0 +1,225 @@
+/**
+ * Core logic for reading and writing Claude Code's auto-memory store.
+ *
+ * Claude Code keeps one memory per file under
+ * `~/.claude/projects/<slugified-cwd>/memory/`, alongside a `MEMORY.md`
+ * index that holds one pointer line per memory. Only the index is loaded
+ * at session start; bodies are read on demand. This module reproduces
+ * that layout exactly so pi and Claude Code share a single store.
+ *
+ * Pure functions plus thin fs wrappers — no pi imports, so it is testable
+ * with plain `node --test`.
+ */
+
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+export interface IndexEntry {
+	title: string;
+	file: string;
+	hook: string;
+}
+
+export interface Memory {
+	name: string;
+	description: string;
+	type: string;
+	body: string;
+}
+
+export interface WriteMemoryInput {
+	name: string;
+	description: string;
+	body: string;
+	type?: string;
+	title?: string;
+	hook?: string;
+}
+
+const INDEX_FILE = "MEMORY.md";
+const DEFAULT_TYPE = "project";
+
+/** Claude Code slugifies the working directory by replacing `/` and `.` with `-`. */
+export function memoryDirFor(cwd: string): string {
+	const absolute = path.resolve(cwd);
+	const slug = absolute.replace(/[/.]/g, "-");
+	return path.join(os.homedir(), ".claude", "projects", slug, "memory");
+}
+
+/** Parse `- [Title](file.md) — hook` pointer lines, ignoring anything else. */
+export function parseIndex(md: string): IndexEntry[] {
+	const entries: IndexEntry[] = [];
+	for (const line of md.split("\n")) {
+		const match = /^\s*-\s*\[([^\]]*)\]\(([^)]+)\)\s*(?:—\s*(.*))?$/.exec(line);
+		if (!match) continue;
+		entries.push({
+			title: match[1].trim(),
+			file: match[2].trim(),
+			hook: (match[3] ?? "").trim(),
+		});
+	}
+	return entries;
+}
+
+function renderIndexLine(entry: IndexEntry): string {
+	const hook = entry.hook.trim();
+	return hook ? `- [${entry.title}](${entry.file}) — ${hook}` : `- [${entry.title}](${entry.file})`;
+}
+
+/** Replace the pointer line for `entry.file` if present, otherwise append it. */
+export function upsertIndexLine(md: string, entry: IndexEntry): string {
+	const rendered = renderIndexLine(entry);
+	const lines = md.split("\n");
+	while (lines.length > 0 && lines[lines.length - 1].trim() === "") lines.pop();
+
+	let replaced = false;
+	const next = lines.map((line) => {
+		const parsed = parseIndex(line)[0];
+		if (parsed && parsed.file === entry.file) {
+			replaced = true;
+			return rendered;
+		}
+		return line;
+	});
+
+	if (!replaced) next.push(rendered);
+	return `${next.join("\n")}\n`;
+}
+
+/** Split a memory file into its frontmatter fields and body. */
+export function parseMemory(text: string): Memory {
+	const match = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/.exec(text);
+	if (!match) {
+		return { name: "", description: "", type: "", body: text.trim() };
+	}
+
+	const [, frontmatter, rest] = match;
+	const field = (key: string): string => {
+		const found = new RegExp(`^\\s*${key}:\\s*(.*)$`, "m").exec(frontmatter);
+		return found ? found[1].trim() : "";
+	};
+
+	return {
+		name: field("name"),
+		description: field("description"),
+		type: field("type"),
+		body: rest.replace(/^\s*\n/, "").trimEnd(),
+	};
+}
+
+/** Render a memory in the frontmatter shape Claude Code writes and reads. */
+export function serializeMemory(input: {
+	name: string;
+	description: string;
+	type?: string;
+	body?: string;
+}): string {
+	return [
+		"---",
+		`name: ${input.name}`,
+		`description: ${input.description}`,
+		"metadata:",
+		"  node_type: memory",
+		`  type: ${input.type || DEFAULT_TYPE}`,
+		"---",
+		"",
+		`${(input.body ?? "").trim()}\n`,
+	].join("\n");
+}
+
+/**
+ * Build the block injected into pi's system prompt: the index only, never the
+ * bodies. This mirrors how Claude Code loads memory — a table of contents up
+ * front, full text pulled on demand — so a large store stays cheap.
+ *
+ * Returns null when the directory holds no memories, so the caller can leave
+ * the prompt untouched.
+ */
+export function buildMemoryPrompt(dir: string): string | null {
+	const indexed = parseIndex(readIndex(dir));
+	const lines = indexed.length
+		? indexed.map((entry) => renderIndexLine(entry))
+		: listMemories(dir).map((memory) =>
+				renderIndexLine({
+					title: memory.name,
+					file: `${memory.name}.md`,
+					hook: memory.description,
+				}),
+			);
+
+	if (lines.length === 0) return null;
+
+	return [
+		"## Memory",
+		"",
+		"You share a persistent memory store with Claude Code for this project.",
+		"Below is the index — one line per memory, bodies not included.",
+		"",
+		...lines,
+		"",
+		"Call `memory_read` with a name (the filename without `.md`) when an entry",
+		"looks relevant to the task at hand. Call `memory_write` to record a durable",
+		"fact — a preference, a project constraint, or guidance you were given.",
+		"Do not record what the repo or git history already says.",
+	].join("\n");
+}
+
+function assertSafeName(name: string): void {
+	if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name) || name.includes("..")) {
+		throw new Error(
+			`Invalid memory name "${name}": use a kebab-case slug with no path separators.`,
+		);
+	}
+}
+
+/** Every memory in the directory, sorted by name. Missing directory yields []. */
+export function listMemories(dir: string): Memory[] {
+	if (!fs.existsSync(dir)) return [];
+	return fs
+		.readdirSync(dir)
+		.filter((file) => file.endsWith(".md") && file !== INDEX_FILE)
+		.sort()
+		.map((file) => {
+			const parsed = parseMemory(fs.readFileSync(path.join(dir, file), "utf8"));
+			return { ...parsed, name: parsed.name || path.basename(file, ".md") };
+		});
+}
+
+/** Read the index file verbatim, or "" when it does not exist yet. */
+export function readIndex(dir: string): string {
+	const file = path.join(dir, INDEX_FILE);
+	return fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
+}
+
+export function readMemory(dir: string, name: string): Memory | null {
+	assertSafeName(name);
+	const file = path.join(dir, `${name}.md`);
+	if (!fs.existsSync(file)) return null;
+	const parsed = parseMemory(fs.readFileSync(file, "utf8"));
+	return { ...parsed, name: parsed.name || name };
+}
+
+/** Write (or overwrite) a memory and register it in the index. */
+export function writeMemory(dir: string, input: WriteMemoryInput): Memory {
+	assertSafeName(input.name);
+	fs.mkdirSync(dir, { recursive: true });
+
+	const memory: Memory = {
+		name: input.name,
+		description: input.description,
+		type: input.type || DEFAULT_TYPE,
+		body: input.body.trim(),
+	};
+
+	fs.writeFileSync(path.join(dir, `${input.name}.md`), serializeMemory(memory));
+
+	const index = upsertIndexLine(readIndex(dir), {
+		title: input.title?.trim() || input.name,
+		file: `${input.name}.md`,
+		hook: input.hook?.trim() || input.description,
+	});
+	fs.writeFileSync(path.join(dir, INDEX_FILE), index);
+
+	return memory;
+}

@@ -1,0 +1,44 @@
+{
+  "name": "pi-claude-memory",
+  "version": "0.1.0",
+  "description": "Pi extension that reads and writes Claude Code's auto-memory store, so both agents share one memory",
+  "author": "Nicolas Marchildon",
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/elecnix/pi-claude-memory.git"
+  },
+  "homepage": "https://github.com/elecnix/pi-claude-memory#readme",
+  "bugs": {
+    "url": "https://github.com/elecnix/pi-claude-memory/issues"
+  },
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "pi-extension",
+    "claude-code",
+    "memory"
+  ],
+  "files": [
+    "extensions/",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test tests/*.test.ts"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    }
+  }
+}
