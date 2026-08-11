@@ -40,7 +40,13 @@ description.
 ## Install
 
 ```bash
-pi install git:github.com/elecnix/pi-claude-memory@main
+pi install npm:pi-claude-memory
+```
+
+Or install from a specific Git ref (e.g. a branch or tag):
+
+```bash
+pi install git:github.com/elecnix/pi-claude-memory@v0.1.1
 ```
 
 Or load it directly for a one-off:
