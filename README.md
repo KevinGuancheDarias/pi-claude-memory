@@ -1,5 +1,7 @@
 # pi-claude-memory
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/elecnix/pi-claude-memory)
+
 A pi extension that reads and writes **Claude Code's own memory store**. Not a
 parallel store, not a sync job — the same files, so a memory saved in either
 agent is immediately visible to the other.
