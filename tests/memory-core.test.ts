@@ -21,14 +21,19 @@ function tmpdir(): string {
 	return fs.mkdtempSync(path.join(os.tmpdir(), "pi-claude-memory-"));
 }
 
-test("memoryDirFor maps a cwd to Claude's project memory directory", () => {
+test("memoryDirFor maps a cwd to Claude's project memory directory", (t) => {
+	// These assert exact POSIX separators; on Windows path.resolve yields
+	// backslashes and a drive colon, so the Windows path is covered by the
+	// dedicated Windows regression test instead.
+	if (process.platform === "win32") return t.skip("POSIX path-format test");
 	const dir = memoryDirFor("/Users/nicolas");
 	assert.equal(dir, path.join(os.homedir(), ".claude/projects/-Users-nicolas/memory"));
 });
 
-test("memoryDirFor replaces dots as well as slashes", () => {
+test("memoryDirFor replaces dots as well as slashes", (t) => {
 	// Claude Code slugifies /Users/dev/Source/my-app.git to
 	// -Users-dev-Source-my-app-git
+	if (process.platform === "win32") return t.skip("POSIX path-format test");
 	const dir = memoryDirFor("/Users/dev/Source/my-app.git");
 	assert.ok(dir.endsWith("/-Users-dev-Source-my-app-git/memory"));
 });
@@ -243,4 +248,38 @@ test("writeMemory output is readable by parseIndex and listMemories together", (
 		listMemories(dir).map((m) => m.description),
 		["da", "db"],
 	);
+});
+
+// The Windows regression: on Windows, path.resolve yields backslashes and a
+// drive colon (e.g. G:\AI). The old regex only collapsed / and ., so a stray
+// backslash/colon stayed inside the projects segment and never matched the
+// directory Claude Code created, making the store look empty. This creates a
+// real memory where memoryDirFor points (a drive-path cwd) and reads it back.
+test("memoryDirFor resolves a working store under a Windows drive path", () => {
+	if (process.platform !== "win32") return;
+
+	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-mem-win-"));
+	const dir = memoryDirFor(cwd);
+	fs.mkdirSync(dir, { recursive: true });
+	writeMemory(dir, { name: "win-path", description: "found via memoryDirFor", body: "ok" });
+
+	const names = listMemories(memoryDirFor(cwd)).map((m) => m.name);
+	assert.deepEqual(names, ["win-path"]);
+});
+
+// Cross-platform invariant: whatever path.resolve produces, the projects slug
+// must be a single filesystem segment with no leftover separators or a drive
+// colon. A leaked separator is exactly the class of bug that broke Windows.
+test("memoryDirFor produces a single slug segment with no stray separators", () => {
+	for (const cwd of ["G:/AI", "C:/Users/kevin/my.project", "K:/iac/elys"]) {
+		const dir = memoryDirFor(cwd);
+		const parts = dir.split(/[\\/]/).filter((p) => p.length > 0);
+		const projectsIdx = parts.indexOf("projects");
+		const segment = parts[projectsIdx + 1];
+		assert.ok(segment && segment.length > 0, `empty slug for ${cwd}`);
+		assert.ok(
+			!/[\/\\:]/.test(segment),
+			`slug for ${cwd} (${segment}) must not contain / \\ or :`,
+		);
+	}
 });

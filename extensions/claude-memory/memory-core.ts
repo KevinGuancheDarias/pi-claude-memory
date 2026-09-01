@@ -40,10 +40,18 @@ export interface WriteMemoryInput {
 const INDEX_FILE = "MEMORY.md";
 const DEFAULT_TYPE = "project";
 
-/** Claude Code slugifies the working directory by replacing `/` and `.` with `-`. */
+/**
+ * Claude Code slugifies the working directory into a single filesystem-safe
+ * segment by collapsing every path separator and the drive colon and dots to
+ * `-`. `path.resolve` returns Windows paths with backslashes and a drive
+ * colon (e.g. `G:\AI`), so all of `/ \ : .` must be replaced. Leaving a `
+ * separator inside the slug (the old `/[/.]/` regex dropped the backslash
+ * and colon) produces a projects segment that never matches the directory
+ * Claude Code created, so the store looks empty.
+ */
 export function memoryDirFor(cwd: string): string {
 	const absolute = path.resolve(cwd);
-	const slug = absolute.replace(/[/.]/g, "-");
+	const slug = absolute.replace(/[/\\.:]/g, "-");
 	return path.join(os.homedir(), ".claude", "projects", slug, "memory");
 }
 
