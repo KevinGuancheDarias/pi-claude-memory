@@ -22,6 +22,8 @@ import path from "node:path";
 
 import {
 	buildMemoryPrompt,
+	deleteMemory,
+	deleteSummary,
 	listMemories,
 	memoryDirFor,
 	memorySummary,
@@ -67,13 +69,14 @@ export default function (pi: ExtensionAPI) {
 				const memory = readMemory(dir, params.name);
 				if (!memory) {
 					const known = listMemories(dir).map((m) => m.name);
+					const hint = known.includes(params.name) ? "" : " Try `memory_delete` to remove it.";
 					return {
 						content: [
 							{
 								type: "text" as const,
 								text: known.length
-									? `No memory named "${params.name}". Available: ${known.join(", ")}`
-									: `No memory named "${params.name}". The store is empty.`,
+									? `No memory named "${params.name}". Available: ${known.join(", ")}${hint}`
+									: `No memory named "${params.name}". The store is empty.${hint}`,
 							},
 						],
 						details: {},
@@ -260,6 +263,75 @@ export default function (pi: ExtensionAPI) {
 				],
 				details: { count: memories.length },
 			};
+		},
+	});
+
+	pi.registerTool({
+		name: "memory_delete",
+		label: "Delete memory",
+		description:
+			"Delete a memory from the store shared with Claude Code. Use when a stored fact is no " +
+			"longer true or no longer wanted. Removes both the memory file and its pointer line in the " +
+			"index in one step, so the two never drift apart — an out-of-band deletion is still healed " +
+			"by reconciliation on the next session.",
+		promptSnippet: "Delete a stored memory",
+		promptGuidelines: [
+			"Call memory_delete only when a memory is stale, wrong, or no longer wanted — not to reorganise.",
+		],
+		parameters: Type.Object({
+			name: Type.String({
+				description:
+					"Memory name, the filename without the .md extension, as listed in the injected index.",
+			}),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const dir = memoryDirFor(ctx.cwd);
+			return withFileMutationQueue(path.join(dir, "MEMORY.md"), async () => {
+				try {
+					const { deleted, pruned, name } = deleteMemory(dir, params.name);
+					return {
+						content: [
+							{ type: "text" as const, text: deleteSummary(name, deleted) },
+						],
+						details: { name, deleted, pruned },
+					};
+				} catch (error) {
+					return {
+						content: [
+							{ type: "text" as const, text: `Could not delete: ${(error as Error).message}` },
+						],
+						details: {},
+					};
+				}
+			});
+		},
+
+		renderResult(result, { expanded, isPartial }, theme, _context) {
+			if (isPartial) return new Text(theme.fg("warning", "Deleting..."), 0, 0);
+			const details = result.details as
+				| { name?: string; deleted?: boolean; pruned?: boolean }
+				| undefined;
+
+			if (!details?.name) {
+				const content = result.content[0];
+				return new Text(
+					theme.fg("error", content?.type === "text" ? content.text : "Failed"),
+					0,
+					0,
+				);
+			}
+
+			return details.deleted
+				? new Text(
+						`${theme.fg("success", `Deleted memory "${details.name}"`)}${
+							details.pruned
+								? theme.fg("dim", " (index line pruned)")
+								: theme.fg("dim", " (no index line to prune)")
+						}`,
+						0,
+						0,
+				)
+				: new Text(theme.fg("warning", `No memory named "${details.name}".`), 0, 0);
 		},
 	});
 }

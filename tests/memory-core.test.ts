@@ -8,13 +8,17 @@ import {
 	memoryDirFor,
 	parseIndex,
 	upsertIndexLine,
+	pruneIndexLine,
 	parseMemory,
 	serializeMemory,
 	listMemories,
 	readMemory,
 	writeMemory,
+	deleteMemory,
 	buildMemoryPrompt,
+	reconcileIndex,
 	memorySummary,
+	deleteSummary,
 } from "../extensions/claude-memory/memory-core.ts";
 
 function tmpdir(): string {
@@ -232,6 +236,157 @@ test("writeMemory reports created=false with the previous body on update", () =>
 test("memorySummary distinguishes save vs update", () => {
 	assert.equal(memorySummary("deploy-runbook", true), 'Saved memory "deploy-runbook".');
 	assert.equal(memorySummary("deploy-runbook", false), 'Updated memory "deploy-runbook".');
+});
+
+test("pruneIndexLine removes only the matching pointer line", () => {
+	const md = "- [A](a.md) — first\n- [B](b.md) — second\n";
+	assert.equal(pruneIndexLine(md, "a.md"), "- [B](b.md) — second\n");
+});
+
+test("pruneIndexLine trims trailing blank lines and returns \"\" when empty", () => {
+	assert.equal(pruneIndexLine("- [A](a.md)\n\n\n", "a.md"), "");
+});
+
+test("reconcileIndex is a no-op when the index already matches disk", () => {
+	const dir = tmpdir();
+	writeMemory(dir, { name: "a", description: "da", body: "ba", title: "A", hook: "ha" });
+	const result = reconcileIndex(dir);
+	assert.equal(result.changed, false);
+	assert.deepEqual(result.pruned, []);
+	assert.deepEqual(result.added, []);
+	assert.match(result.index, /- \[A\]\(a\.md\) — ha/);
+});
+
+test("reconcileIndex prunes an index pointer whose file was deleted out of band", () => {
+	const dir = tmpdir();
+	writeMemory(dir, { name: "keep", description: "keep me", body: "b", title: "Keep", hook: "hk" });
+	writeMemory(dir, { name: "gone", description: "gone", body: "b", title: "Gone", hook: "hg" });
+
+	// Simulate a manual `rm`: the file is gone but the index line lingers.
+	fs.unlinkSync(path.join(dir, "gone.md"));
+
+	const result = reconcileIndex(dir);
+	assert.deepEqual(result.pruned, ["gone.md"]);
+	assert.deepEqual(result.added, []);
+	assert.match(result.index, /- \[Keep\]\(keep\.md\) — hk/);
+	assert.doesNotMatch(result.index, /- \[Gone\]\(gone\.md\)/);
+});
+
+test("reconcileIndex indexes a memory file with no pointer line", () => {
+	const dir = tmpdir();
+	fs.writeFileSync(
+		path.join(dir, "late.md"),
+		serializeMemory({ name: "late", description: "added on read" }),
+	);
+
+	const result = reconcileIndex(dir);
+	assert.deepEqual(result.added, ["late.md"]);
+	assert.deepEqual(result.pruned, []);
+	assert.match(result.index, /late/);
+});
+
+test("reconcileIndex preserves human-written titles and hooks", () => {
+	const dir = tmpdir();
+	writeMemory(dir, {
+		name: "handwritten",
+		description: "placeholder",
+		body: "b",
+		title: "A Human Title",
+		hook: "a human hook",
+	});
+
+	// Overwrite the file's frontmatter description with something stale;
+	// the verified index line must still carry the original human summary.
+	fs.writeFileSync(
+		path.join(dir, "handwritten.md"),
+		serializeMemory({ name: "handwritten", description: "stale", body: "b" }),
+	);
+
+	const result = reconcileIndex(dir);
+	assert.match(result.index, /- \[A Human Title\]\(handwritten\.md\) — a human hook/);
+});
+
+test("buildMemoryPrompt does not surface a memory whose file was deleted out of band", () => {
+	const dir = tmpdir();
+	writeMemory(dir, { name: "a", description: "da", body: "ba", title: "A", hook: "ha" });
+	writeMemory(dir, { name: "b", description: "db", body: "bb", title: "B", hook: "hb" });
+
+	fs.unlinkSync(path.join(dir, "b.md"));
+
+	const prompt = buildMemoryPrompt(dir);
+	assert.ok(prompt);
+	assert.match(prompt, /- \[A\]\(a\.md\) — ha/);
+	assert.doesNotMatch(prompt, /b\.md/);
+
+	// The index on disk was healed in place, not just filtered in memory.
+	const index = fs.readFileSync(path.join(dir, "MEMORY.md"), "utf8");
+	assert.doesNotMatch(index, /b\.md/);
+});
+
+test("buildMemoryPrompt indexes an orphan file and persists the healed index", () => {
+	const dir = tmpdir();
+	fs.writeFileSync(
+		path.join(dir, "orphan.md"),
+		serializeMemory({ name: "orphan", description: "no index line exists" }),
+	);
+
+	const prompt = buildMemoryPrompt(dir);
+	assert.ok(prompt);
+	assert.match(prompt, /orphan/);
+	assert.match(fs.readFileSync(path.join(dir, "MEMORY.md"), "utf8"), /orphan/);
+});
+
+test("deleteMemory removes the file and prunes its index line", () => {
+	const dir = tmpdir();
+	writeMemory(dir, { name: "keep", description: "d", body: "b", title: "Keep", hook: "hk" });
+	writeMemory(dir, { name: "gone", description: "d", body: "b", title: "Gone", hook: "hg" });
+
+	const result = deleteMemory(dir, "gone");
+	assert.equal(result.deleted, true);
+	assert.equal(result.pruned, true);
+	assert.ok(!fs.existsSync(path.join(dir, "gone.md")));
+
+	const index = fs.readFileSync(path.join(dir, "MEMORY.md"), "utf8");
+	assert.doesNotMatch(index, /gone\.md/);
+	assert.match(index, /Keep/);
+});
+
+test("deleteMemory on an unknown name leaves the store untouched", () => {
+	const dir = tmpdir();
+	writeMemory(dir, { name: "a", description: "d", body: "b", title: "A", hook: "ha" });
+	const before = fs.readFileSync(path.join(dir, "MEMORY.md"), "utf8");
+
+	const result = deleteMemory(dir, "missing");
+	assert.equal(result.deleted, false);
+	assert.equal(result.pruned, false);
+	assert.equal(fs.readFileSync(path.join(dir, "MEMORY.md"), "utf8"), before);
+});
+
+test("deleteMemory heals a dangling index line even when the file is already gone", () => {
+	const dir = tmpdir();
+	writeMemory(dir, { name: "gone", description: "d", body: "b", title: "Gone", hook: "hg" });
+	const before = fs.readFileSync(path.join(dir, "MEMORY.md"), "utf8");
+	assert.match(before, /gone\.md/);
+
+	// File removed out of band first...
+	fs.unlinkSync(path.join(dir, "gone.md"));
+	// ...then deleteMemory prunes the lingering pointer.
+	const result = deleteMemory(dir, "gone");
+	assert.equal(result.deleted, false);
+	assert.equal(result.pruned, true);
+	assert.doesNotMatch(fs.readFileSync(path.join(dir, "MEMORY.md"), "utf8"), /gone\.md/);
+	assert.notEqual(fs.readFileSync(path.join(dir, "MEMORY.md"), "utf8"), before);
+});
+
+test("deleteMemory rejects a name that escapes the memory directory", () => {
+	const dir = tmpdir();
+	assert.throws(() => deleteMemory(dir, "../escape"), /name/i);
+	assert.throws(() => deleteMemory(dir, "a/b"), /name/i);
+});
+
+test("deleteSummary distinguishes deleted vs not found", () => {
+	assert.equal(deleteSummary("x", true), 'Deleted memory "x".');
+	assert.equal(deleteSummary("x", false), 'No memory named "x".');
 });
 
 test("writeMemory output is readable by parseIndex and listMemories together", () => {
